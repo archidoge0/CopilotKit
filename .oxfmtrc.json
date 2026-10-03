@@ -13,6 +13,8 @@
     "showcase/aimock/shared/**",
     "showcase/aimock/d4/**",
     "showcase/aimock/d6/**",
-    "**/package.json"
+    "**/package.json",
+    ".github/workflows/ghav-*.yml",
+    ".oxfmtrc.json"
   ]
 }

@@ -1,0 +1,133 @@
+name: "ghav before: release / publish"
+"on":
+  push:
+    branches:
+      - ghav/dev/5046
+    paths:
+      - .ghav/before
+permissions:
+  contents: read
+env:
+  NX_VERBOSE_LOGGING: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - name: Determine scope and mode
+        id: meta
+        env:
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          INPUT_SCOPE: ${{ inputs.scope }}
+          INPUT_MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          if [ -n "$INPUT_SCOPE" ]; then
+            SCOPE="$INPUT_SCOPE"
+          else
+            # Branch format: release/publish/<scope>/v<version>
+            SCOPE="${PR_HEAD_REF#release/publish/}"
+            SCOPE="${SCOPE%%/v*}"
+          fi
+          MODE="${INPUT_MODE:-stable}"
+          echo "scope=$SCOPE" >> "$GITHUB_OUTPUT"
+          echo "mode=$MODE"   >> "$GITHUB_OUTPUT"
+          echo "Detected scope: $SCOPE, mode: $MODE"
+      - name: Checkout Repo
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093
+      - name: Setup Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22.x
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Bump prerelease versions
+        if: ${{ steps.meta.outputs.mode == 'prerelease' }}
+        env:
+          INPUT_SCOPE: ${{ inputs.scope }}
+          INPUT_SUFFIX: ${{ inputs.suffix }}
+        run: |
+          set -euo pipefail
+          if [ -n "$INPUT_SUFFIX" ]; then
+            if ! [[ "$INPUT_SUFFIX" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+              echo "::error::Invalid suffix '$INPUT_SUFFIX'. Allowed: [a-zA-Z0-9._-]+"
+              exit 1
+            fi
+            pnpm tsx scripts/release/bump-prerelease.ts --scope "$INPUT_SCOPE" --suffix "$INPUT_SUFFIX"
+          else
+            pnpm tsx scripts/release/bump-prerelease.ts --scope "$INPUT_SCOPE"
+          fi
+      - name: Build packages
+        run: pnpm run build
+      - name: Upload workspace
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: workspace
+          path: |
+            .
+            !**/node_modules/**
+            !**/.next/**
+            !**/.turbo/**
+            !**/.nx/**
+          include-hidden-files: true
+          retention-days: 1
+    outputs:
+      scope: ${{ steps.meta.outputs.scope }}
+      mode: ${{ steps.meta.outputs.mode }}
+  publish:
+    needs: build
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: npm
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - name: Download workspace
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: workspace
+      - name: Configure git credentials
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config --local url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093
+      - name: Setup Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22.x
+          registry-url: https://registry.npmjs.org
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Dry-run notice
+        if: ${{ inputs.dry-run == true }}
+        run: |
+          {
+            echo "## Dry Run"
+            echo ""
+            echo "DRY RUN — skipping publish step. Scope: ${{ steps.meta.outputs.scope }}, mode: ${{ steps.meta.outputs.mode }}."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Dry-run summary
+        if: ${{ success() && inputs.dry-run == true }}
+        run: |
+          {
+            echo "## Dry Run Completed"
+            echo ""
+            echo "**Scope:** ${{ steps.meta.outputs.scope }}"
+            echo "**Mode:** ${{ steps.meta.outputs.mode }}"
+            echo "- Publish step was skipped; no npm publish, no git tag, no GitHub Release."
+          } >> "$GITHUB_STEP_SUMMARY"
+    outputs:
+      version: ${{ steps.publish.outputs.version }}
+      tag: ${{ steps.tag.outputs.tag }}
